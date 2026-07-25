@@ -55,12 +55,13 @@ class McCardImage private constructor(
             // 528, so that check can't distinguish them; this does.
             val page0 = bytes.copyOfRange(0, PLAIN_STRIDE)
             val probeSuperblock = McSuperblock.parse(page0)
-            val expectedPages = probeSuperblock.clustersPerCard.toLong() * probeSuperblock.pagesPerCluster
+            val expectedPages: Long = probeSuperblock.clustersPerCard.toLong() * probeSuperblock.pagesPerCluster.toLong()
+            val fileSize: Long = bytes.size.toLong()
 
             val stride = when {
-                bytes.size % ECC_STRIDE == 0 && bytes.size / ECC_STRIDE == expectedPages -> ECC_STRIDE
-                bytes.size % PLAIN_STRIDE == 0 && bytes.size / PLAIN_STRIDE == expectedPages -> PLAIN_STRIDE
-                bytes.size % ECC_STRIDE == 0 -> ECC_STRIDE // best guess if neither matches exactly
+                fileSize % ECC_STRIDE == 0L && fileSize / ECC_STRIDE == expectedPages -> ECC_STRIDE
+                fileSize % PLAIN_STRIDE == 0L && fileSize / PLAIN_STRIDE == expectedPages -> PLAIN_STRIDE
+                fileSize % ECC_STRIDE == 0L -> ECC_STRIDE // best guess if neither matches exactly
                 else -> PLAIN_STRIDE
             }
             val hasEcc = stride == ECC_STRIDE
@@ -116,8 +117,6 @@ class McCardImage private constructor(
         return chain
     }
 
-    // Entries per indirect-FAT cluster / per FAT cluster (both are cluster_size / 4, since
-    // each entry is a uint32 cluster pointer).
     private val entriesPerFatCluster: Int get() = clusterSize / 4
 
     /**
@@ -127,11 +126,9 @@ class McCardImage private constructor(
      */
     private fun readFatEntry(relCluster: Int): Int {
         val perCluster = entriesPerFatCluster
-        // Which FAT cluster (0-based) holds this entry, and the entry's index within it.
         val fatClusterIndex = relCluster / perCluster
         val entryIndexInFatCluster = relCluster % perCluster
 
-        // Which indirect-FAT cluster holds the pointer to that FAT cluster.
         val ifcIndex = fatClusterIndex / perCluster
         val fatPointerIndexInIfc = fatClusterIndex % perCluster
 
@@ -187,7 +184,6 @@ class McCardImage private constructor(
     }
 }
 
-/** Little-endian uint32 read, returned as Int (values above 0x7FFFFFFF will be negative — fine for our use, we only compare to FAT_TERMINATOR / use as array indices where values stay small). */
 internal fun readUInt32LE(data: ByteArray, offset: Int): Int =
     ByteBuffer.wrap(data, offset, 4).order(ByteOrder.LITTLE_ENDIAN).int
 
@@ -196,10 +192,6 @@ internal fun readUInt16LE(data: ByteArray, offset: Int): Int =
 
 class McParseException(message: String) : Exception(message)
 
-/**
- * PS2 memory card superblock (page 0 of the image).
- * Layout matches the format documented/used by mymc and PS2 Save Builder.
- */
 data class McSuperblock(
     val magic: String,
     val version: String,
@@ -207,12 +199,12 @@ data class McSuperblock(
     val pagesPerCluster: Int,
     val pagesPerBlock: Int,
     val clustersPerCard: Int,
-    val allocOffset: Int,      // first allocatable cluster
-    val allocEnd: Int,         // cluster after the last allocatable one
-    val rootDirCluster: Int,   // relative to allocOffset
+    val allocOffset: Int,
+    val allocEnd: Int,
+    val rootDirCluster: Int,
     val backupBlock1: Int,
     val backupBlock2: Int,
-    val ifcList: List<Int>,    // indirect FAT cluster pointers (absolute cluster numbers)
+    val ifcList: List<Int>,
     val cardType: Int,
     val cardFlags: Int
 ) {
@@ -231,7 +223,7 @@ data class McSuperblock(
             val backupBlock2 = readUInt32LE(page0, 0x44)
 
             val ifcList = (0 until 32).map { i -> readUInt32LE(page0, 0x50 + i * 4) }
-                .filter { it != -1 } // unused slots are 0xFFFFFFFF
+                .filter { it != -1 }
 
             val cardType = page0[0x150].toInt() and 0xFF
             val cardFlags = page0[0x151].toInt() and 0xFF
@@ -253,19 +245,11 @@ data class McSuperblock(
     }
 }
 
-/**
- * A single 512-byte directory-entry record — one per file or save-folder on the card.
- *
- * Note: the mode-bit meanings below are the commonly cited ones from PS2 homebrew tools.
- * DF_DIRECTORY (top bit) and "used" are the two we rely on structurally, and those are
- * solid. The others (read/write/protected/hidden) are for display only right now — worth
- * double-checking against a real card's known-protected save before trusting them for logic.
- */
 data class McDirEntry(
     val mode: Int,
-    val length: Int,      // file: byte size. directory: number of entries it contains.
-    val cluster: Int,      // starting cluster (relative to allocOffset)
-    val dirEntryIndex: Int, // parent's ordinal; used to reconstruct paths
+    val length: Int,
+    val cluster: Int,
+    val dirEntryIndex: Int,
     val name: String,
     val createdEpochMillis: Long,
     val modifiedEpochMillis: Long
@@ -290,7 +274,6 @@ data class McDirEntry(
             return McDirEntry(mode, length, cluster, dirEntryIndex, name, created, modified)
         }
 
-        /** PS2 8-byte timestamp: [unused, sec, min, hour, day, month, year_lo, year_hi]. */
         private fun parseTimestamp(data: ByteArray, offset: Int): Long {
             val sec = data[offset + 1].toInt() and 0xFF
             val min = data[offset + 2].toInt() and 0xFF
