@@ -37,32 +37,36 @@ class McCardImage private constructor(
                 throw McParseException("File is too small to be a memory card image (${bytes.size} bytes).")
             }
 
-            // Detect ECC vs plain by trying the magic string at page 0 under each stride.
             val magic = "Sony PS2 Memory Card Format "
-            val magicBytesPlain = String(bytes, 0, minOf(magic.length, bytes.size), Charsets.US_ASCII)
+            val magicCheck = String(bytes, 0, minOf(magic.length, bytes.size), Charsets.US_ASCII)
+            if (!magicCheck.startsWith(magic)) {
+                throw McParseException(
+                    "Doesn't look like a PS2 memory card image — expected magic string " +
+                        "\"Sony PS2 Memory Card Format\" at the start of the file, found: " +
+                        "\"${magicCheck.take(29)}\""
+                )
+            }
 
-            // Magic string lives at offset 0 in page 0 either way (spare bytes are appended
-            // after each page's data, not interleaved within it), so the check above is the
-            // same for both — what differs is how we compute page N's file offset afterward.
-            // Prefer ECC layout only when the plain-stride guess doesn't evenly divide a
-            // sane card size; in practice checking size % 528 == 0 is a reliable signal since
-            // 512-multiples and 528-multiples essentially never coincide for real card sizes.
+            // Page 0's data lives at file offset 0 regardless of stride, so we can parse the
+            // superblock once and use it to figure out which stride is actually correct: the
+            // real number of pages the card claims to have (clustersPerCard * pagesPerCluster)
+            // must equal fileSize / stride. File-size divisibility alone isn't reliable — every
+            // standard PS2 card size (8/16/32/64MB) happens to divide evenly by both 512 and
+            // 528, so that check can't distinguish them; this does.
+            val page0 = bytes.copyOfRange(0, PLAIN_STRIDE)
+            val probeSuperblock = McSuperblock.parse(page0)
+            val expectedPages = probeSuperblock.clustersPerCard.toLong() * probeSuperblock.pagesPerCluster
+
             val stride = when {
-                bytes.size % ECC_STRIDE == 0 && bytes.size % PLAIN_STRIDE != 0 -> ECC_STRIDE
+                bytes.size % ECC_STRIDE == 0 && bytes.size / ECC_STRIDE == expectedPages -> ECC_STRIDE
+                bytes.size % PLAIN_STRIDE == 0 && bytes.size / PLAIN_STRIDE == expectedPages -> PLAIN_STRIDE
+                bytes.size % ECC_STRIDE == 0 -> ECC_STRIDE // best guess if neither matches exactly
                 else -> PLAIN_STRIDE
             }
             val hasEcc = stride == ECC_STRIDE
 
-            if (!magicBytesPlain.startsWith(magic)) {
-                throw McParseException(
-                    "Doesn't look like a PS2 memory card image — expected magic string " +
-                        "\"Sony PS2 Memory Card Format\" at the start of the file, found: " +
-                        "\"${magicBytesPlain.take(29)}\""
-                )
-            }
-
             val image = McCardImage(bytes, PLAIN_STRIDE, stride, hasEcc)
-            image.superblock = McSuperblock.parse(image.readPage(0))
+            image.superblock = probeSuperblock
             return image
         }
     }
