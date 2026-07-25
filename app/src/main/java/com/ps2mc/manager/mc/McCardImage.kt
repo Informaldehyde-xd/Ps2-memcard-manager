@@ -3,6 +3,8 @@ package com.ps2mc.manager.mc
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
+private const val FAT_TERMINATOR = -1 // 0xFFFFFFFF as signed Int
+
 /**
  * Parses a raw PS2 memory card image (.ps2/.bin/.mcd) — the format used by
  * PCSX2, uLaunchELF, mymc, PS2 Save Builder, etc.
@@ -38,8 +40,6 @@ class McCardImage private constructor(
             // Detect ECC vs plain by trying the magic string at page 0 under each stride.
             val magic = "Sony PS2 Memory Card Format "
             val magicBytesPlain = String(bytes, 0, minOf(magic.length, bytes.size), Charsets.US_ASCII)
-            val eccCandidateOk = bytes.size % ECC_STRIDE == 0 && magicBytesPlain.startsWith(magic)
-            val plainCandidateOk = bytes.size % PLAIN_STRIDE == 0 && magicBytesPlain.startsWith(magic)
 
             // Magic string lives at offset 0 in page 0 either way (spare bytes are appended
             // after each page's data, not interleaved within it), so the check above is the
@@ -180,10 +180,6 @@ class McCardImage private constructor(
             written += toCopy
         }
         return out
-    }
-
-    private companion object Fat {
-        const val FAT_TERMINATOR = -1 // 0xFFFFFFFF as signed Int
     }
 }
 
