@@ -47,12 +47,6 @@ class McCardImage private constructor(
                 )
             }
 
-            // Page 0's data lives at file offset 0 regardless of stride, so we can parse the
-            // superblock once and use it to figure out which stride is actually correct: the
-            // real number of pages the card claims to have (clustersPerCard * pagesPerCluster)
-            // must equal fileSize / stride. File-size divisibility alone isn't reliable — every
-            // standard PS2 card size (8/16/32/64MB) happens to divide evenly by both 512 and
-            // 528, so that check can't distinguish them; this does.
             val page0 = bytes.copyOfRange(0, PLAIN_STRIDE)
             val probeSuperblock = McSuperblock.parse(page0)
             val expectedPages: Long = probeSuperblock.clustersPerCard.toLong() * probeSuperblock.pagesPerCluster.toLong()
@@ -61,7 +55,7 @@ class McCardImage private constructor(
             val stride = when {
                 fileSize % ECC_STRIDE == 0L && fileSize / ECC_STRIDE == expectedPages -> ECC_STRIDE
                 fileSize % PLAIN_STRIDE == 0L && fileSize / PLAIN_STRIDE == expectedPages -> PLAIN_STRIDE
-                fileSize % ECC_STRIDE == 0L -> ECC_STRIDE // best guess if neither matches exactly
+                fileSize % ECC_STRIDE == 0L -> ECC_STRIDE
                 else -> PLAIN_STRIDE
             }
             val hasEcc = stride == ECC_STRIDE
@@ -72,7 +66,6 @@ class McCardImage private constructor(
         }
     }
 
-    /** Reads page [index] (data only — spare/ECC bytes, if any, are excluded). */
     fun readPage(index: Int): ByteArray {
         val fileOffset = index.toLong() * pageStride
         if (fileOffset + pageSize > raw.size) {
@@ -81,7 +74,6 @@ class McCardImage private constructor(
         return raw.copyOfRange(fileOffset.toInt(), (fileOffset + pageSize).toInt())
     }
 
-    /** Reads cluster [index] (concatenation of pagesPerCluster pages). */
     fun readCluster(index: Int): ByteArray {
         val pagesPerCluster = superblock.pagesPerCluster
         val out = ByteArray(pageSize * pagesPerCluster)
@@ -94,11 +86,6 @@ class McCardImage private constructor(
 
     val clusterSize: Int get() = pageSize * superblock.pagesPerCluster
 
-    /**
-     * Walks the indirect FAT to resolve the full cluster chain starting at [startCluster]
-     * (a cluster number relative to superblock.allocOffset, as stored in directory entries).
-     * Returns absolute cluster numbers (already offset by allocOffset) in chain order.
-     */
     fun getClusterChain(startCluster: Int): List<Int> {
         if (startCluster < 0) return emptyList()
         val chain = mutableListOf<Int>()
@@ -119,11 +106,6 @@ class McCardImage private constructor(
 
     private val entriesPerFatCluster: Int get() = clusterSize / 4
 
-    /**
-     * Reads FAT entry for relative cluster [relCluster] via the two-level indirect FAT
-     * described by superblock.ifcList. Returns the next relative cluster in the chain,
-     * or FAT_TERMINATOR (0xFFFFFFFF) if this is the last cluster.
-     */
     private fun readFatEntry(relCluster: Int): Int {
         val perCluster = entriesPerFatCluster
         val fatClusterIndex = relCluster / perCluster
@@ -147,7 +129,6 @@ class McCardImage private constructor(
         return readUInt32LE(fatData, entryIndexInFatCluster * 4)
     }
 
-    /** Lists entries (files and subdirectories) inside the directory whose data starts at [startCluster]. */
     fun listDirectory(startCluster: Int): List<McDirEntry> {
         val chain = getClusterChain(startCluster)
         val entriesPerCluster = clusterSize / McDirEntry.ENTRY_SIZE
@@ -164,11 +145,9 @@ class McCardImage private constructor(
         return result
     }
 
-    /** Convenience: lists the root directory, skipping "." and "..". */
     fun listRoot(): List<McDirEntry> =
         listDirectory(superblock.rootDirCluster).filter { it.name != "." && it.name != ".." }
 
-    /** Reads the raw bytes of a file entry given its starting cluster and byte length. */
     fun readFileData(startCluster: Int, length: Int): ByteArray {
         val chain = getClusterChain(startCluster)
         val out = ByteArray(length)
@@ -245,17 +224,27 @@ data class McSuperblock(
     }
 }
 
+/**
+ * A single 512-byte directory-entry record — one per file or save-folder on the card.
+ *
+ * Mode bit layout (matches mymc / ps2 save tools convention):
+ *   0x0001 DF_READ, 0x0002 DF_WRITE, 0x0004 DF_EXECUTE, 0x0008 DF_PROTECTED,
+ *   0x0010 DF_FILE, 0x0020 DF_DIRECTORY, 0x8000 DF_EXISTS (slot is in use).
+ * DF_EXISTS is the correct "used" check — a previous version of this file
+ * incorrectly used DF_READ (0x0001) for that, which could under- or over-count
+ * entries depending on what garbage bits are left in unused slots.
+ */
 data class McDirEntry(
     val mode: Int,
-    val length: Int,
-    val cluster: Int,
-    val dirEntryIndex: Int,
+    val length: Int,      // file: byte size. directory: number of entries it contains.
+    val cluster: Int,      // starting cluster (relative to allocOffset)
+    val dirEntryIndex: Int, // parent's ordinal; used to reconstruct paths
     val name: String,
     val createdEpochMillis: Long,
     val modifiedEpochMillis: Long
 ) {
     val isDirectory: Boolean get() = (mode and 0x0020) != 0
-    val isUsed: Boolean get() = (mode and 0x0001) != 0 && name.isNotBlank()
+    val isUsed: Boolean get() = (mode and 0x8000) != 0 && name.isNotBlank()
     val isProtected: Boolean get() = (mode and 0x0008) != 0
 
     companion object {
