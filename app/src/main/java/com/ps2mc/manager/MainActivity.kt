@@ -14,11 +14,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.lifecycle.ViewModel
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ps2mc.manager.data.McCardRepository
-import com.ps2mc.manager.mc.McCardImage
 import com.ps2mc.manager.ui.theme.PS2MCManagerTheme
 import kotlinx.coroutines.launch
 
@@ -48,7 +46,16 @@ class TestViewModel(application: android.app.Application) : AndroidViewModel(app
                         val root = image.listRoot()
                         appendLine("Root directory: ${root.size} entr${if (root.size == 1) "y" else "ies"}")
                         root.forEach { e ->
-                            appendLine("  ${if (e.isDirectory) "[DIR]" else "     "} ${e.name}  (${e.length} bytes)")
+                            appendLine("  ${if (e.isDirectory) "[DIR]" else "     "} ${e.name}  (${e.length} bytes, mode=0x${e.mode.toString(16)})")
+                        }
+
+                        if (root.isEmpty()) {
+                            appendLine()
+                            appendLine("Diagnostic — raw hex of first 3 directory slots")
+                            appendLine("(mode·unused·length·created·cluster·dirEntry·modified·attr·pad·name = 96 bytes each):")
+                            for (i in 0 until 3) {
+                                appendLine("slot $i: ${image.dumpRawEntryHex(image.superblock.rootDirCluster, i)}")
+                            }
                         }
                     } catch (e: Exception) {
                         appendLine("Directory listing failed: ${e.message}")
