@@ -3,11 +3,16 @@ package com.ps2mc.manager.mc
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-private const val FAT_TERMINATOR = -1 // 0xFFFFFFFF as signed Int
+private const val FAT_TERMINATOR = -1 // 0xFFFFFFFF as signed Int — PS2MC_FAT_CHAIN_END
+private const val FAT_CLUSTER_MASK = 0x7FFFFFFF // low 31 bits = next-cluster index
 
 /**
  * Parses a raw PS2 memory card image (.ps2/.bin/.mcd) — the format used by
  * PCSX2, uLaunchELF, mymc, PS2 Save Builder, etc.
+ *
+ * Structure and field offsets verified against Ross Ridge's (mymc author)
+ * published PS2 memory card file system documentation and the ps2dev/mymc
+ * source (ps2mc.py), not just recollection.
  *
  * A PS2 memory card is its own tiny filesystem: a superblock, an indirect
  * FAT (two levels of cluster pointers), and 512-byte directory-entry
@@ -117,6 +122,13 @@ class McCardImage private constructor(
      * Reads FAT entry for relative cluster [relCluster] via the two-level indirect FAT
      * described by superblock.ifcList. Returns the next relative cluster in the chain,
      * or FAT_TERMINATOR (0xFFFFFFFF) if this is the last cluster.
+     *
+     * Per the official format spec: each 32-bit FAT entry has its top bit set when the
+     * cluster is allocated, with the real next-cluster index in the lower 31 bits. A
+     * previous version of this function used the raw value directly, which (since the
+     * allocated bit is always set on real chain entries) came out as a negative Int and
+     * silently broke the chain-walk loop after just one cluster. Fixed by special-casing
+     * the exact terminator value and masking off the allocated bit otherwise.
      */
     private fun readFatEntry(relCluster: Int): Int {
         val perCluster = entriesPerFatCluster
@@ -138,7 +150,55 @@ class McCardImage private constructor(
         val fatClusterAbs = readUInt32LE(ifcData, fatPointerIndexInIfc * 4)
 
         val fatData = readCluster(fatClusterAbs)
-        return readUInt32LE(fatData, entryIndexInFatCluster * 4)
+        val raw = readUInt32LE(fatData, entryIndexInFatCluster * 4)
+
+        if (raw == FAT_TERMINATOR) return FAT_TERMINATOR
+        return raw and FAT_CLUSTER_MASK
+    }
+
+    /**
+     * Diagnostic helper: shows every intermediate value in the two-level indirect-FAT
+     * lookup for [relCluster]. Kept around for troubleshooting subdirectories/edge cases
+     * even though the root-cause FAT masking bug is now fixed.
+     */
+    fun dumpFatDebug(relCluster: Int): String = buildString {
+        val perCluster = entriesPerFatCluster
+        val fatClusterIndex = relCluster / perCluster
+        val entryIndexInFatCluster = relCluster % perCluster
+        val ifcIndex = fatClusterIndex / perCluster
+        val fatPointerIndexInIfc = fatClusterIndex % perCluster
+
+        appendLine("relCluster=$relCluster  entriesPerFatCluster(=clusterSize/4)=$perCluster")
+        appendLine("fatClusterIndex=$fatClusterIndex  entryIndexInFatCluster=$entryIndexInFatCluster")
+        appendLine("ifcIndex=$ifcIndex  fatPointerIndexInIfc=$fatPointerIndexInIfc")
+        appendLine("superblock.ifcList=${superblock.ifcList}")
+
+        if (ifcIndex >= superblock.ifcList.size) {
+            appendLine("!! ifcIndex is out of range of ifcList (size=${superblock.ifcList.size})")
+            return@buildString
+        }
+        val ifcCluster = superblock.ifcList[ifcIndex]
+        appendLine("ifcCluster (absolute cluster #) = $ifcCluster")
+
+        val ifcData = readCluster(ifcCluster)
+        val ifcFirst8 = (0 until 8).map { readUInt32LE(ifcData, it * 4) }
+        appendLine("IFC cluster's first 8 u32 entries: $ifcFirst8")
+
+        val fatClusterAbs = readUInt32LE(ifcData, fatPointerIndexInIfc * 4)
+        appendLine("-> fatClusterAbs (read at IFC offset ${fatPointerIndexInIfc * 4}) = $fatClusterAbs")
+
+        if (fatClusterAbs < 0 || fatClusterAbs >= superblock.clustersPerCard) {
+            appendLine("!! fatClusterAbs looks invalid for this image (clustersPerCard=${superblock.clustersPerCard})")
+            return@buildString
+        }
+
+        val fatData = readCluster(fatClusterAbs)
+        val fatFirst8 = (0 until 8).map { readUInt32LE(fatData, it * 4) }
+        appendLine("FAT cluster's first 8 u32 entries: $fatFirst8")
+
+        val nextRaw = readUInt32LE(fatData, entryIndexInFatCluster * 4)
+        val nextResolved = if (nextRaw == FAT_TERMINATOR) FAT_TERMINATOR else nextRaw and FAT_CLUSTER_MASK
+        appendLine("-> FAT[$relCluster] raw = $nextRaw (hex: 0x${nextRaw.toUInt().toString(16)}), resolved next cluster = $nextResolved")
     }
 
     /** Lists entries (files and subdirectories) inside the directory whose data starts at [startCluster]. */
@@ -164,8 +224,7 @@ class McCardImage private constructor(
 
     /**
      * Diagnostic helper: returns the raw 96 bytes (mode..name) of directory entry [entryIndex]
-     * inside the directory starting at [startCluster], as a hex string. Used to inspect the
-     * real on-disk layout when parsed results look wrong, without guessing further.
+     * inside the directory starting at [startCluster], as a hex string.
      */
     fun dumpRawEntryHex(startCluster: Int, entryIndex: Int): String {
         val chain = getClusterChain(startCluster)
@@ -203,6 +262,10 @@ internal fun readUInt16LE(data: ByteArray, offset: Int): Int =
 
 class McParseException(message: String) : Exception(message)
 
+/**
+ * PS2 memory card superblock (page 0 of the image). Offsets verified against the
+ * official file-system documentation (Ross Ridge / mymc).
+ */
 data class McSuperblock(
     val magic: String,
     val version: String,
@@ -210,12 +273,12 @@ data class McSuperblock(
     val pagesPerCluster: Int,
     val pagesPerBlock: Int,
     val clustersPerCard: Int,
-    val allocOffset: Int,
-    val allocEnd: Int,
-    val rootDirCluster: Int,
+    val allocOffset: Int,      // first allocatable cluster
+    val allocEnd: Int,         // cluster after the last allocatable one
+    val rootDirCluster: Int,   // relative to allocOffset
     val backupBlock1: Int,
     val backupBlock2: Int,
-    val ifcList: List<Int>,
+    val ifcList: List<Int>,    // indirect FAT cluster pointers (absolute cluster numbers)
     val cardType: Int,
     val cardFlags: Int
 ) {
@@ -259,15 +322,16 @@ data class McSuperblock(
 /**
  * A single 512-byte directory-entry record — one per file or save-folder on the card.
  *
- * Layout (matches the mymc / PS2 save-tool convention):
- *   mode(2) unused(2) length(4) created(8) cluster(4) dirEntry(4) modified(8)
- *   attr(4) padding(28) name(32) padding(416) = 512 bytes total.
+ * Layout (verified against the official spec):
+ *   0x00 mode(2) 0x02 unused(2) 0x04 length(4) 0x08 created(8) 0x10 cluster(4)
+ *   0x14 dirEntry(4) 0x18 modified(8) 0x20 attr(4) 0x24 padding(28) 0x40 name(32)
+ *   = 512 bytes total (rest is padding).
  *
- * "Used" detection: rather than rely on a specific mode bit (two guesses at that —
- * 0x0001 and 0x8000 — both turned out wrong against a real card), this checks
- * whether the name field is non-empty. A free/deleted slot is zero-filled, so its
- * name decodes to an empty string; a real entry always has a name. This is the
- * more robust signal and doesn't depend on an unverified bit-flag assumption.
+ * Mode flags confirmed against the spec:
+ *   0x0001 DF_READ, 0x0002 DF_WRITE, 0x0004 DF_EXECUTE, 0x0008 DF_PROTECTED,
+ *   0x0010 DF_FILE, 0x0020 DF_DIRECTORY, 0x2000 DF_HIDDEN, 0x8000 DF_EXISTS.
+ * DF_EXISTS (0x8000) is the correct "used" flag — this entry is in use; if clear,
+ * the file/directory has been deleted.
  */
 data class McDirEntry(
     val mode: Int,
@@ -279,8 +343,9 @@ data class McDirEntry(
     val modifiedEpochMillis: Long
 ) {
     val isDirectory: Boolean get() = (mode and 0x0020) != 0
-    val isUsed: Boolean get() = name.isNotBlank()
+    val isUsed: Boolean get() = (mode and 0x8000) != 0
     val isProtected: Boolean get() = (mode and 0x0008) != 0
+    val isHidden: Boolean get() = (mode and 0x2000) != 0
 
     companion object {
         const val ENTRY_SIZE = 512
