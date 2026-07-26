@@ -237,6 +237,8 @@ class McCardImage private constructor(
         val slice = data.copyOfRange(offset, offset + 96)
         return slice.joinToString(" ") { "%02X".format(it) }
     }
+    /** Returns a copy of this image's underlying bytes — used as the starting point for McCardWriter. */
+    fun rawBytesCopy(): ByteArray = raw.copyOf()
 
     /** Reads the raw bytes of a file entry given its starting cluster and byte length. */
     fun readFileData(startCluster: Int, length: Int): ByteArray {
