@@ -1,73 +1,25 @@
 package com.ps2mc.manager
 
-import android.net.Uri
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
-import com.ps2mc.manager.data.McCardRepository
+import com.ps2mc.manager.ui.AppViewModel
+import com.ps2mc.manager.ui.CardBrowserScreen
+import com.ps2mc.manager.ui.HomeScreen
+import com.ps2mc.manager.ui.Screen
 import com.ps2mc.manager.ui.theme.PS2MCManagerTheme
-import kotlinx.coroutines.launch
-
-class TestViewModel(application: android.app.Application) : AndroidViewModel(application) {
-    private val repo = McCardRepository(application)
-    var resultText by mutableStateOf("Pick a memory card image (.ps2 / .bin / .mcd) to test the parser.")
-        private set
-
-    fun open(uri: Uri) {
-        viewModelScope.launch {
-            resultText = "Parsing..."
-            val (image, error) = repo.openCard(uri)
-            resultText = if (image != null) {
-                buildString {
-                    appendLine("Parsed OK ✓")
-                    appendLine()
-                    appendLine("magic: ${image.superblock.magic}")
-                    appendLine("version: ${image.superblock.version}")
-                    appendLine("pageSize: ${image.superblock.pageSize}")
-                    appendLine("pagesPerCluster: ${image.superblock.pagesPerCluster}")
-                    appendLine("clustersPerCard: ${image.superblock.clustersPerCard}")
-                    appendLine("allocOffset: ${image.superblock.allocOffset}")
-                    appendLine("rootDirCluster: ${image.superblock.rootDirCluster}")
-                    appendLine("hasEcc: ${image.hasEcc}")
-                    appendLine()
-                    try {
-                        val root = image.listRoot()
-                        appendLine("Root directory: ${root.size} entr${if (root.size == 1) "y" else "ies"}")
-                        root.forEach { e ->
-                            appendLine("  ${if (e.isDirectory) "[DIR]" else "     "} ${e.name}  (${e.length} bytes, mode=0x${e.mode.toString(16)})")
-                        }
-
-                        if (root.isEmpty()) {
-                            appendLine()
-                            appendLine("=== FAT chain diagnostic for root dir ===")
-                            try {
-                                appendLine(image.dumpFatDebug(image.superblock.rootDirCluster))
-                            } catch (e: Exception) {
-                                appendLine("dumpFatDebug threw: ${e.message}")
-                            }
-                        }
-                    } catch (e: Exception) {
-                        appendLine("Directory listing failed: ${e.message}")
-                    }
-                }
-            } else {
-                "Failed to parse: $error"
-            }
-        }
-    }
-}
+import androidx.compose.foundation.layout.fillMaxSize
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -75,7 +27,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             PS2MCManagerTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    TestScreen()
+                    AppRoot()
                 }
             }
         }
@@ -83,25 +35,37 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun TestScreen(viewModel: TestViewModel = viewModel()) {
+fun AppRoot(viewModel: AppViewModel = viewModel()) {
+    val context = LocalContext.current
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { viewModel.open(it) }
+        uri?.let { viewModel.openCard(it, it.lastPathSegment?.substringAfterLast('/')) }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp)
-    ) {
-        Text("PS2 MC Manager — Engine Test", style = MaterialTheme.typography.titleLarge)
-        Spacer(Modifier.height(12.dp))
-        Button(onClick = { launcher.launch(arrayOf("*/*")) }) {
-            Text("Pick memory card image")
-        }
-        Spacer(Modifier.height(16.dp))
-        Text(
-            viewModel.resultText,
-            modifier = Modifier.verticalScroll(rememberScrollState())
+    viewModel.errorMessage?.let { msg ->
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissError() },
+            confirmButton = {
+                TextButton(onClick = { viewModel.dismissError() }) { Text("OK") }
+            },
+            title = { Text("Couldn't open card") },
+            text = { Text(msg) }
+        )
+    }
+
+    when (viewModel.screen) {
+        Screen.HOME -> HomeScreen(
+            isLoading = viewModel.isLoading,
+            onOpenCard = { launcher.launch(arrayOf("*/*")) },
+            onRecentCards = { Toast.makeText(context, "Recent cards — coming soon", Toast.LENGTH_SHORT).show() },
+            onImportSave = { Toast.makeText(context, "Import save — coming soon", Toast.LENGTH_SHORT).show() },
+            onSettings = { Toast.makeText(context, "Settings — coming soon", Toast.LENGTH_SHORT).show() }
+        )
+        Screen.CARD_BROWSER -> CardBrowserScreen(
+            cardName = viewModel.cardFileName ?: "Memory Card",
+            entries = viewModel.rootEntries,
+            viewMode = viewModel.viewMode,
+            onToggleViewMode = { viewModel.toggleViewMode() },
+            onBack = { viewModel.goHome() }
         )
     }
 }
