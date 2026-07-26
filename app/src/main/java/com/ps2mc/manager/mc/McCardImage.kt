@@ -66,6 +66,7 @@ class McCardImage private constructor(
         }
     }
 
+    /** Reads page [index] (data only — spare/ECC bytes, if any, are excluded). */
     fun readPage(index: Int): ByteArray {
         val fileOffset = index.toLong() * pageStride
         if (fileOffset + pageSize > raw.size) {
@@ -74,6 +75,7 @@ class McCardImage private constructor(
         return raw.copyOfRange(fileOffset.toInt(), (fileOffset + pageSize).toInt())
     }
 
+    /** Reads cluster [index] (concatenation of pagesPerCluster pages). */
     fun readCluster(index: Int): ByteArray {
         val pagesPerCluster = superblock.pagesPerCluster
         val out = ByteArray(pageSize * pagesPerCluster)
@@ -86,6 +88,11 @@ class McCardImage private constructor(
 
     val clusterSize: Int get() = pageSize * superblock.pagesPerCluster
 
+    /**
+     * Walks the indirect FAT to resolve the full cluster chain starting at [startCluster]
+     * (a cluster number relative to superblock.allocOffset, as stored in directory entries).
+     * Returns absolute cluster numbers (already offset by allocOffset) in chain order.
+     */
     fun getClusterChain(startCluster: Int): List<Int> {
         if (startCluster < 0) return emptyList()
         val chain = mutableListOf<Int>()
@@ -106,6 +113,11 @@ class McCardImage private constructor(
 
     private val entriesPerFatCluster: Int get() = clusterSize / 4
 
+    /**
+     * Reads FAT entry for relative cluster [relCluster] via the two-level indirect FAT
+     * described by superblock.ifcList. Returns the next relative cluster in the chain,
+     * or FAT_TERMINATOR (0xFFFFFFFF) if this is the last cluster.
+     */
     private fun readFatEntry(relCluster: Int): Int {
         val perCluster = entriesPerFatCluster
         val fatClusterIndex = relCluster / perCluster
@@ -129,6 +141,7 @@ class McCardImage private constructor(
         return readUInt32LE(fatData, entryIndexInFatCluster * 4)
     }
 
+    /** Lists entries (files and subdirectories) inside the directory whose data starts at [startCluster]. */
     fun listDirectory(startCluster: Int): List<McDirEntry> {
         val chain = getClusterChain(startCluster)
         val entriesPerCluster = clusterSize / McDirEntry.ENTRY_SIZE
@@ -145,9 +158,28 @@ class McCardImage private constructor(
         return result
     }
 
+    /** Convenience: lists the root directory, skipping "." and "..". */
     fun listRoot(): List<McDirEntry> =
         listDirectory(superblock.rootDirCluster).filter { it.name != "." && it.name != ".." }
 
+    /**
+     * Diagnostic helper: returns the raw 96 bytes (mode..name) of directory entry [entryIndex]
+     * inside the directory starting at [startCluster], as a hex string. Used to inspect the
+     * real on-disk layout when parsed results look wrong, without guessing further.
+     */
+    fun dumpRawEntryHex(startCluster: Int, entryIndex: Int): String {
+        val chain = getClusterChain(startCluster)
+        val entriesPerCluster = clusterSize / McDirEntry.ENTRY_SIZE
+        val clusterIdx = entryIndex / entriesPerCluster
+        val indexInCluster = entryIndex % entriesPerCluster
+        if (clusterIdx >= chain.size) return "(out of range — chain has ${chain.size} cluster(s))"
+        val data = readCluster(chain[clusterIdx])
+        val offset = indexInCluster * McDirEntry.ENTRY_SIZE
+        val slice = data.copyOfRange(offset, offset + 96)
+        return slice.joinToString(" ") { "%02X".format(it) }
+    }
+
+    /** Reads the raw bytes of a file entry given its starting cluster and byte length. */
     fun readFileData(startCluster: Int, length: Int): ByteArray {
         val chain = getClusterChain(startCluster)
         val out = ByteArray(length)
@@ -227,12 +259,15 @@ data class McSuperblock(
 /**
  * A single 512-byte directory-entry record — one per file or save-folder on the card.
  *
- * Mode bit layout (matches mymc / ps2 save tools convention):
- *   0x0001 DF_READ, 0x0002 DF_WRITE, 0x0004 DF_EXECUTE, 0x0008 DF_PROTECTED,
- *   0x0010 DF_FILE, 0x0020 DF_DIRECTORY, 0x8000 DF_EXISTS (slot is in use).
- * DF_EXISTS is the correct "used" check — a previous version of this file
- * incorrectly used DF_READ (0x0001) for that, which could under- or over-count
- * entries depending on what garbage bits are left in unused slots.
+ * Layout (matches the mymc / PS2 save-tool convention):
+ *   mode(2) unused(2) length(4) created(8) cluster(4) dirEntry(4) modified(8)
+ *   attr(4) padding(28) name(32) padding(416) = 512 bytes total.
+ *
+ * "Used" detection: rather than rely on a specific mode bit (two guesses at that —
+ * 0x0001 and 0x8000 — both turned out wrong against a real card), this checks
+ * whether the name field is non-empty. A free/deleted slot is zero-filled, so its
+ * name decodes to an empty string; a real entry always has a name. This is the
+ * more robust signal and doesn't depend on an unverified bit-flag assumption.
  */
 data class McDirEntry(
     val mode: Int,
@@ -244,7 +279,7 @@ data class McDirEntry(
     val modifiedEpochMillis: Long
 ) {
     val isDirectory: Boolean get() = (mode and 0x0020) != 0
-    val isUsed: Boolean get() = (mode and 0x8000) != 0 && name.isNotBlank()
+    val isUsed: Boolean get() = name.isNotBlank()
     val isProtected: Boolean get() = (mode and 0x0008) != 0
 
     companion object {
@@ -258,11 +293,12 @@ data class McDirEntry(
             val dirEntryIndex = readUInt32LE(data, offset + 20)
             val modified = parseTimestamp(data, offset + 24)
             val nameBytes = data.copyOfRange(offset + 64, offset + 64 + 32)
-            val name = String(nameBytes, Charsets.US_ASCII).substringBefore('\u0000')
+            val name = String(nameBytes, Charsets.US_ASCII).substringBefore('\u0000').trim()
 
             return McDirEntry(mode, length, cluster, dirEntryIndex, name, created, modified)
         }
 
+        /** PS2 8-byte timestamp: [unused, sec, min, hour, day, month, year_lo, year_hi]. */
         private fun parseTimestamp(data: ByteArray, offset: Int): Long {
             val sec = data[offset + 1].toInt() and 0xFF
             val min = data[offset + 2].toInt() and 0xFF
