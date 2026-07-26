@@ -51,10 +51,11 @@ class TestViewModel(application: android.app.Application) : AndroidViewModel(app
 
                         if (root.isEmpty()) {
                             appendLine()
-                            appendLine("Diagnostic — raw hex of first 3 directory slots")
-                            appendLine("(mode·unused·length·created·cluster·dirEntry·modified·attr·pad·name = 96 bytes each):")
-                            for (i in 0 until 3) {
-                                appendLine("slot $i: ${image.dumpRawEntryHex(image.superblock.rootDirCluster, i)}")
+                            appendLine("=== FAT chain diagnostic for root dir ===")
+                            try {
+                                appendLine(image.dumpFatDebug(image.superblock.rootDirCluster))
+                            } catch (e: Exception) {
+                                appendLine("dumpFatDebug threw: ${e.message}")
                             }
                         }
                     } catch (e: Exception) {
