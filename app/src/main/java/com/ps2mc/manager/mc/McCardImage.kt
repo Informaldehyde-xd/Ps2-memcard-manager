@@ -239,6 +239,31 @@ class McCardImage private constructor(
     }
     /** Returns a copy of this image's underlying bytes — used as the starting point for McCardWriter. */
     fun rawBytesCopy(): ByteArray = raw.copyOf()
+    /** Returns a copy of this image's underlying bytes — used as the starting point for McCardWriter. */
+    fun rawBytesCopy(): ByteArray = raw.copyOf()
+
+    /**
+     * Returns this image's data with any ECC/spare bytes stripped — a "plain" memory card
+     * image (512 bytes/page, no gaps), which PCSX2 and most software tools expect by default.
+     * Use this for any file written back out after edits: this app's writer only touches the
+     * 512-byte data portion of a page, never recomputes the 16-byte hardware ECC, so an edited
+     * page's original ECC bytes go stale. A reader that validates ECC would then reject that
+     * page as corrupt — exporting plain avoids the problem entirely rather than risking a
+     * hand-rolled, untested ECC implementation.
+     */
+    fun exportPlainBytes(): ByteArray {
+        if (!hasEcc) return raw.copyOf()
+        val totalPages = raw.size / pageStride
+        val out = ByteArray(totalPages * pageSize)
+        for (p in 0 until totalPages) {
+            val srcOff = p.toLong() * pageStride
+            System.arraycopy(raw, srcOff.toInt(), out, p * pageSize, pageSize)
+        }
+        return out
+    }
+
+    /** Reads the raw bytes of a file entry given its starting cluster and byte length. */
+    fun readFileData(startCluster: Int, length: Int): ByteArray {
 
     /** Reads the raw bytes of a file entry given its starting cluster and byte length. */
     fun readFileData(startCluster: Int, length: Int): ByteArray {
