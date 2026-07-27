@@ -43,6 +43,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var clipboardEntry by mutableStateOf<McDirEntry?>(null)
         private set
 
+    // Working copy of the card's bytes; every write operation replaces this, then the
+    // read-only McCardImage is re-parsed from it so the UI always reflects current state.
     private var workingBytes: ByteArray? = null
     private var loadedCard: McCardImage? = null
     private var dirStack = mutableListOf<DirLevel>()
@@ -83,12 +85,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewMode = if (viewMode == ViewMode.GRID) ViewMode.LIST else ViewMode.GRID
     }
 
+    /** Tapping an entry: descend into it if it's a folder, otherwise no-op (files aren't opened yet). */
     fun onEntryTapped(entry: McDirEntry) {
         if (!entry.isDirectory) return
         dirStack.add(DirLevel(entry.cluster, entry.name))
         refreshCurrentDir()
     }
 
+    /** Back arrow: go up one directory level, or return to Home if already at root. */
     fun onBackPressed() {
         if (dirStack.size > 1) {
             dirStack.removeAt(dirStack.lastIndex)
@@ -160,6 +164,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Re-parses the freshly written bytes and refreshes the current directory view. */
     private fun applyWrittenBytes(newBytes: ByteArray) {
         val newImage = McCardImage.open(newBytes)
         workingBytes = newBytes
@@ -168,12 +173,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun exportTo(uri: Uri) {
-        val bytes = workingBytes ?: return
+        val image = loadedCard ?: return
         viewModelScope.launch {
             isLoading = true
             try {
-                app.contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
-                statusMessage = "Saved. Original card was not modified."
+                val plainBytes = image.exportPlainBytes()
+                app.contentResolver.openOutputStream(uri)?.use { it.write(plainBytes) }
+                statusMessage = "Saved (plain format). Original card was not modified."
             } catch (e: Exception) {
                 errorMessage = "Save failed: ${e.message}"
             }
