@@ -52,6 +52,12 @@ class McCardImage private constructor(
                 )
             }
 
+            // Page 0's data lives at file offset 0 regardless of stride, so we can parse the
+            // superblock once and use it to figure out which stride is actually correct: the
+            // real number of pages the card claims to have (clustersPerCard * pagesPerCluster)
+            // must equal fileSize / stride. File-size divisibility alone isn't reliable — every
+            // standard PS2 card size (8/16/32/64MB) happens to divide evenly by both 512 and
+            // 528, so that check can't distinguish them; this does.
             val page0 = bytes.copyOfRange(0, PLAIN_STRIDE)
             val probeSuperblock = McSuperblock.parse(page0)
             val expectedPages: Long = probeSuperblock.clustersPerCard.toLong() * probeSuperblock.pagesPerCluster.toLong()
@@ -60,7 +66,7 @@ class McCardImage private constructor(
             val stride = when {
                 fileSize % ECC_STRIDE == 0L && fileSize / ECC_STRIDE == expectedPages -> ECC_STRIDE
                 fileSize % PLAIN_STRIDE == 0L && fileSize / PLAIN_STRIDE == expectedPages -> PLAIN_STRIDE
-                fileSize % ECC_STRIDE == 0L -> ECC_STRIDE
+                fileSize % ECC_STRIDE == 0L -> ECC_STRIDE // best guess if neither matches exactly
                 else -> PLAIN_STRIDE
             }
             val hasEcc = stride == ECC_STRIDE
@@ -237,6 +243,7 @@ class McCardImage private constructor(
         val slice = data.copyOfRange(offset, offset + 96)
         return slice.joinToString(" ") { "%02X".format(it) }
     }
+
     /** Returns a copy of this image's underlying bytes — used as the starting point for McCardWriter. */
     fun rawBytesCopy(): ByteArray = raw.copyOf()
 
@@ -259,9 +266,6 @@ class McCardImage private constructor(
         }
         return out
     }
-
-    /** Reads the raw bytes of a file entry given its starting cluster and byte length. */
-    fun readFileData(startCluster: Int, length: Int): ByteArray {
 
     /** Reads the raw bytes of a file entry given its starting cluster and byte length. */
     fun readFileData(startCluster: Int, length: Int): ByteArray {
@@ -322,7 +326,7 @@ data class McSuperblock(
             val backupBlock2 = readUInt32LE(page0, 0x44)
 
             val ifcList = (0 until 32).map { i -> readUInt32LE(page0, 0x50 + i * 4) }
-                .filter { it != -1 }
+                .filter { it != -1 } // unused slots are 0xFFFFFFFF
 
             val cardType = page0[0x150].toInt() and 0xFF
             val cardFlags = page0[0x151].toInt() and 0xFF
