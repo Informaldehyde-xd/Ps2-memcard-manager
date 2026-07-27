@@ -239,8 +239,6 @@ class McCardImage private constructor(
     }
     /** Returns a copy of this image's underlying bytes — used as the starting point for McCardWriter. */
     fun rawBytesCopy(): ByteArray = raw.copyOf()
-    /** Returns a copy of this image's underlying bytes — used as the starting point for McCardWriter. */
-    fun rawBytesCopy(): ByteArray = raw.copyOf()
 
     /**
      * Returns this image's data with any ECC/spare bytes stripped — a "plain" memory card
