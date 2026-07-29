@@ -173,11 +173,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun exportTo(uri: Uri) {
-        val bytes = workingBytes ?: return
+        // Prefer exporting a "plain" 512-byte/page image (strips ECC/spare) when we have a parsed image.
+        // This avoids writing stale ECC/spare bytes that would make edited pages appear corrupt.
+        val bytesToWrite = loadedCard?.exportPlainBytes() ?: workingBytes ?: return
         viewModelScope.launch {
             isLoading = true
             try {
-                app.contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                app.contentResolver.openOutputStream(uri)?.use { it.write(bytesToWrite) }
                 statusMessage = "Saved. Original card was not modified."
             } catch (e: Exception) {
                 errorMessage = "Save failed: ${e.message}"
