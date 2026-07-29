@@ -173,13 +173,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun exportTo(uri: Uri) {
-        val image = loadedCard ?: return
+        val bytes = workingBytes ?: return
         viewModelScope.launch {
             isLoading = true
             try {
-                val plainBytes = image.exportPlainBytes()
-                app.contentResolver.openOutputStream(uri)?.use { it.write(plainBytes) }
-                statusMessage = "Saved (plain format). Original card was not modified."
+                app.contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                statusMessage = "Saved. Original card was not modified."
             } catch (e: Exception) {
                 errorMessage = "Save failed: ${e.message}"
             }
