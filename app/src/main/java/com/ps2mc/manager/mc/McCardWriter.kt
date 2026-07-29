@@ -189,6 +189,59 @@ class McCardWriter private constructor(
         buf[offset + 7] = ((year shr 8) and 0xFF).toByte()
     }
 
+    /** Counts currently-used (DF_EXISTS set) entries in the directory at [dirStartRel]. */
+    private fun countUsedEntries(dirStartRel: Int): Int {
+        val chain = getClusterChain(dirStartRel)
+        var count = 0
+        for (clusterAbs in chain) {
+            for (slot in 0 until entriesPerDirCluster) {
+                val modeOff = absoluteOffset(clusterAbs, slot * McDirEntry.ENTRY_SIZE)
+                val mode = (data[modeOff].toInt() and 0xFF) or ((data[modeOff + 1].toInt() and 0xFF) shl 8)
+                if ((mode and 0x8000) != 0) count++
+            }
+        }
+        return count
+    }
+
+    private fun updateDotLength(dirStartRel: Int, newLength: Int) {
+        val firstAbs = getClusterChain(dirStartRel).first()
+        writeU32(firstAbs, 4, newLength) // "." is always slot 0; length field is at byte offset 4
+    }
+
+    /** Finds the entry inside [parentStartRel] whose cluster field is [targetRelCluster] and updates its length. */
+    private fun updateEntryLengthInParent(parentStartRel: Int, targetRelCluster: Int, newLength: Int) {
+        val chain = getClusterChain(parentStartRel)
+        for (clusterAbs in chain) {
+            for (slot in 0 until entriesPerDirCluster) {
+                val base = slot * McDirEntry.ENTRY_SIZE
+                val modeOff = absoluteOffset(clusterAbs, base)
+                val mode = (data[modeOff].toInt() and 0xFF) or ((data[modeOff + 1].toInt() and 0xFF) shl 8)
+                if ((mode and 0x8000) == 0) continue
+                val clusterField = readU32(clusterAbs, base + 16)
+                if (clusterField == targetRelCluster) {
+                    writeU32(clusterAbs, base + 4, newLength)
+                    return
+                }
+            }
+        }
+    }
+
+    /**
+     * Call after adding any entry into [dirStartRel]: recomputes its real child count and
+     * writes it into both its own "." record and its entry as seen from its own parent
+     * (found via its ".." record). Fixes stale `length` fields left over from creation time,
+     * which some readers use to know how many entries to expect.
+     */
+    private fun syncLengthAfterAddingChild(dirStartRel: Int) {
+        val newCount = countUsedEntries(dirStartRel)
+        updateDotLength(dirStartRel, newCount)
+        val firstAbs = getClusterChain(dirStartRel).first()
+        val dotDotClusterField = readU32(firstAbs, McDirEntry.ENTRY_SIZE + 16) // slot 1 = "..", cluster field at +16
+        if (dotDotClusterField != dirStartRel) {
+            updateEntryLengthInParent(dotDotClusterField, dirStartRel, newCount)
+        }
+    }
+
     /** Finds a free (deleted) slot in [parentStartRel]'s directory, or extends its chain by one cluster. */
     private fun findOrCreateFreeDirSlot(parentStartRel: Int): Pair<Int, Int> {
         val chain = getClusterChain(parentStartRel)
@@ -219,11 +272,15 @@ class McCardWriter private constructor(
         zeroCluster(newAbs)
 
         val now = System.currentTimeMillis()
+        // Mode values mirror what we observed on a real card: 0x8427 for "." (dir+exists+rwx),
+        // 0xA426 for "..". dirEntryIndex is left at -1 (unused) for directory-type entries per
+        // the spec description; not yet verified against a real create operation.
         writeDirEntry(newAbs, 0, RawDirEntry(0x8427, 2, parentStartRel, -1, ".", now))
         writeDirEntry(newAbs, 1, RawDirEntry(0xA426, 2, parentStartRel, -1, "..", now))
 
         val (slotClusterAbs, slotIndex) = findOrCreateFreeDirSlot(parentStartRel)
         writeDirEntry(slotClusterAbs, slotIndex, RawDirEntry(0x8427, 2, newRel, -1, name, now))
+        syncLengthAfterAddingChild(parentStartRel)
         return newRel
     }
 
@@ -249,6 +306,7 @@ class McCardWriter private constructor(
             slotClusterAbs, slotIndex,
             RawDirEntry(sourceEntry.mode, lengthBytes, newClusters[0], 0, sourceEntry.name, System.currentTimeMillis())
         )
+        syncLengthAfterAddingChild(destParentStartRel)
     }
 
     /**
