@@ -8,11 +8,13 @@ import java.util.TimeZone
  * copy of the card's bytes — never mutates the original array/file. Call
  * [exportBytes] to get the finished image for saving to a NEW file.
  *
- * Field semantics for dirEntryIndex and the exact ".." cluster convention are
- * implemented per the written spec, not yet cross-checked against a real
- * create/copy performed by an official tool — flagged inline where relevant.
- * Recommended workflow: export, re-open with McCardImage to sanity check,
- * and verify in PCSX2/mymc before trusting a result on real hardware.
+ * "." / ".." semantics and the root-directory special case are now implemented
+ * per Ross Ridge's published spec (ps2savetools.com/ps2memcardformat.html),
+ * not guessed: for every directory except root, "." and ".." are inert
+ * placeholders with length=0 and cluster=0. Only the entry describing a
+ * directory from within its PARENT's listing carries a real length/cluster.
+ * Root is the one exception: its own first entry doubles as its real
+ * descriptor, and its length field does hold the real child count.
  */
 class McCardWriter private constructor(
     private val data: ByteArray,
@@ -109,7 +111,6 @@ class McCardWriter private constructor(
         writeFatRaw(relCluster, value)
     }
 
-    /** Finds [count] free clusters in the data area and links them into a chain (terminator on the last). */
     fun allocateChain(count: Int): List<Int> {
         require(count > 0)
         val totalDataClusters = superblock.allocEnd - superblock.allocOffset
@@ -129,7 +130,6 @@ class McCardWriter private constructor(
         return free
     }
 
-    /** Cluster chain for a relative start cluster — writer's own copy, reflects in-progress edits. */
     fun getClusterChain(startRel: Int): List<Int> {
         if (startRel < 0) return emptyList()
         val chain = mutableListOf<Int>()
@@ -189,7 +189,6 @@ class McCardWriter private constructor(
         buf[offset + 7] = ((year shr 8) and 0xFF).toByte()
     }
 
-    /** Counts currently-used (DF_EXISTS set) entries in the directory at [dirStartRel]. */
     private fun countUsedEntries(dirStartRel: Int): Int {
         val chain = getClusterChain(dirStartRel)
         var count = 0
@@ -205,10 +204,9 @@ class McCardWriter private constructor(
 
     private fun updateDotLength(dirStartRel: Int, newLength: Int) {
         val firstAbs = getClusterChain(dirStartRel).first()
-        writeU32(firstAbs, 4, newLength) // "." is always slot 0; length field is at byte offset 4
+        writeU32(firstAbs, 4, newLength)
     }
 
-    /** Finds the entry inside [parentStartRel] whose cluster field is [targetRelCluster] and updates its length. */
     private fun updateEntryLengthInParent(parentStartRel: Int, targetRelCluster: Int, newLength: Int) {
         val chain = getClusterChain(parentStartRel)
         for (clusterAbs in chain) {
@@ -226,23 +224,18 @@ class McCardWriter private constructor(
         }
     }
 
-    /**
-     * Call after adding any entry into [dirStartRel]: recomputes its real child count and
-     * writes it into both its own "." record and its entry as seen from its own parent
-     * (found via its ".." record). Fixes stale `length` fields left over from creation time,
-     * which some readers use to know how many entries to expect.
-     */
-    private fun syncLengthAfterAddingChild(dirStartRel: Int) {
-        val newCount = countUsedEntries(dirStartRel)
-        updateDotLength(dirStartRel, newCount)
-        val firstAbs = getClusterChain(dirStartRel).first()
-        val dotDotClusterField = readU32(firstAbs, McDirEntry.ENTRY_SIZE + 16) // slot 1 = "..", cluster field at +16
-        if (dotDotClusterField != dirStartRel) {
-            updateEntryLengthInParent(dotDotClusterField, dirStartRel, newCount)
+    private fun syncDirEntryCount(dirRel: Int, parentOfDirRel: Int?) {
+        val newCount = countUsedEntries(dirRel)
+        if (dirRel == superblock.rootDirCluster) {
+            updateDotLength(dirRel, newCount)
+        } else {
+            updateDotLength(dirRel, 0)
+            if (parentOfDirRel != null) {
+                updateEntryLengthInParent(parentOfDirRel, dirRel, newCount)
+            }
         }
     }
 
-    /** Finds a free (deleted) slot in [parentStartRel]'s directory, or extends its chain by one cluster. */
     private fun findOrCreateFreeDirSlot(parentStartRel: Int): Pair<Int, Int> {
         val chain = getClusterChain(parentStartRel)
         val perCluster = entriesPerDirCluster
@@ -262,30 +255,27 @@ class McCardWriter private constructor(
         return newAbs to 0
     }
 
-    /**
-     * Creates a new, empty save/folder inside the directory at [parentStartRel].
-     * Returns the new folder's relative starting cluster.
-     */
-    fun createFolder(parentStartRel: Int, name: String): Int {
+    fun createFolder(parentStartRel: Int, parentOfParentStartRel: Int?, name: String): Int {
         val newRel = allocateChain(1)[0]
         val newAbs = newRel + superblock.allocOffset
         zeroCluster(newAbs)
 
         val now = System.currentTimeMillis()
-        // Mode values mirror what we observed on a real card: 0x8427 for "." (dir+exists+rwx),
-        // 0xA426 for "..". dirEntryIndex is left at -1 (unused) for directory-type entries per
-        // the spec description; not yet verified against a real create operation.
-        writeDirEntry(newAbs, 0, RawDirEntry(0x8427, 2, parentStartRel, -1, ".", now))
-        writeDirEntry(newAbs, 1, RawDirEntry(0xA426, 2, parentStartRel, -1, "..", now))
+        writeDirEntry(newAbs, 0, RawDirEntry(0x8427, 0, 0, 0, ".", now))
+        writeDirEntry(newAbs, 1, RawDirEntry(0xA426, 0, 0, 0, "..", now))
 
         val (slotClusterAbs, slotIndex) = findOrCreateFreeDirSlot(parentStartRel)
-        writeDirEntry(slotClusterAbs, slotIndex, RawDirEntry(0x8427, 2, newRel, -1, name, now))
-        syncLengthAfterAddingChild(parentStartRel)
+        writeDirEntry(slotClusterAbs, slotIndex, RawDirEntry(0x8427, 2, newRel, 0, name, now))
+        syncDirEntryCount(parentStartRel, parentOfParentStartRel)
         return newRel
     }
 
-    /** Copies a single file's data + directory entry from [sourceImage] into [destParentStartRel]. */
-    fun copyFileEntry(sourceImage: McCardImage, sourceEntry: McDirEntry, destParentStartRel: Int) {
+    fun copyFileEntry(
+        sourceImage: McCardImage,
+        sourceEntry: McDirEntry,
+        destParentStartRel: Int,
+        parentOfDestParentStartRel: Int?
+    ) {
         val lengthBytes = sourceEntry.length
         val clustersNeeded = if (lengthBytes == 0) 1 else (lengthBytes + clusterSize - 1) / clusterSize
         val newClusters = allocateChain(clustersNeeded)
@@ -306,21 +296,21 @@ class McCardWriter private constructor(
             slotClusterAbs, slotIndex,
             RawDirEntry(sourceEntry.mode, lengthBytes, newClusters[0], 0, sourceEntry.name, System.currentTimeMillis())
         )
-        syncLengthAfterAddingChild(destParentStartRel)
+        syncDirEntryCount(destParentStartRel, parentOfDestParentStartRel)
     }
 
-    /**
-     * Copies an entire save folder (and its files, one level deep — matches how real PS2
-     * saves are structured) from [sourceImage] into the directory at [destParentStartRel].
-     */
-    fun copyFolderInto(sourceImage: McCardImage, sourceFolder: McDirEntry, destParentStartRel: Int) {
-        val newFolderRel = createFolder(destParentStartRel, sourceFolder.name)
+    fun copyFolderInto(
+        sourceImage: McCardImage,
+        sourceFolder: McDirEntry,
+        destParentStartRel: Int,
+        parentOfDestParentStartRel: Int?
+    ) {
+        val newFolderRel = createFolder(destParentStartRel, parentOfDestParentStartRel, sourceFolder.name)
         val sourceFiles = sourceImage.listDirectory(sourceFolder.cluster).filter { it.name != "." && it.name != ".." }
         for (f in sourceFiles) {
-            copyFileEntry(sourceImage, f, newFolderRel)
+            copyFileEntry(sourceImage, f, newFolderRel, destParentStartRel)
         }
     }
 
-    /** Final image bytes, ready to be written to a new file. */
     fun exportBytes(): ByteArray = data.copyOf()
 }
