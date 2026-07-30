@@ -43,11 +43,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var clipboardEntry by mutableStateOf<McDirEntry?>(null)
         private set
 
-    // Working copy of the card's bytes; every write operation replaces this, then the
-    // read-only McCardImage is re-parsed from it so the UI always reflects current state.
     private var workingBytes: ByteArray? = null
     private var loadedCard: McCardImage? = null
     private var dirStack = mutableListOf<DirLevel>()
+
+    /** relCluster of the directory that is the CURRENT dir's own parent, or null if current dir is root. */
+    private fun parentOfCurrentDir(): Int? =
+        if (dirStack.size >= 2) dirStack[dirStack.size - 2].relCluster else null
 
     fun openCard(uri: Uri, displayName: String?) {
         viewModelScope.launch {
@@ -85,14 +87,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewMode = if (viewMode == ViewMode.GRID) ViewMode.LIST else ViewMode.GRID
     }
 
-    /** Tapping an entry: descend into it if it's a folder, otherwise no-op (files aren't opened yet). */
     fun onEntryTapped(entry: McDirEntry) {
         if (!entry.isDirectory) return
         dirStack.add(DirLevel(entry.cluster, entry.name))
         refreshCurrentDir()
     }
 
-    /** Back arrow: go up one directory level, or return to Home if already at root. */
     fun onBackPressed() {
         if (dirStack.size > 1) {
             dirStack.removeAt(dirStack.lastIndex)
@@ -127,10 +127,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val writer = McCardWriter.from(bytes, image)
                 val destRel = dirStack.last().relCluster
+                val parentOfDest = parentOfCurrentDir()
                 if (entry.isDirectory) {
-                    writer.copyFolderInto(image, entry, destRel)
+                    writer.copyFolderInto(image, entry, destRel, parentOfDest)
                 } else {
-                    writer.copyFileEntry(image, entry, destRel)
+                    writer.copyFileEntry(image, entry, destRel, parentOfDest)
                 }
                 applyWrittenBytes(writer.exportBytes())
                 statusMessage = "Pasted \"${entry.name}\""
@@ -154,7 +155,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             isLoading = true
             try {
                 val writer = McCardWriter.from(bytes, image)
-                writer.createFolder(dirStack.last().relCluster, trimmed)
+                writer.createFolder(dirStack.last().relCluster, parentOfCurrentDir(), trimmed)
                 applyWrittenBytes(writer.exportBytes())
                 statusMessage = "Created \"$trimmed\""
             } catch (e: Exception) {
@@ -164,7 +165,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Re-parses the freshly written bytes and refreshes the current directory view. */
     private fun applyWrittenBytes(newBytes: ByteArray) {
         val newImage = McCardImage.open(newBytes)
         workingBytes = newBytes
@@ -173,13 +173,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun exportTo(uri: Uri) {
-        // Prefer exporting a "plain" 512-byte/page image (strips ECC/spare) when we have a parsed image.
-        // This avoids writing stale ECC/spare bytes that would make edited pages appear corrupt.
-        val bytesToWrite = loadedCard?.exportPlainBytes() ?: workingBytes ?: return
+        val bytes = workingBytes ?: return
         viewModelScope.launch {
             isLoading = true
             try {
-                app.contentResolver.openOutputStream(uri)?.use { it.write(bytesToWrite) }
+                app.contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
                 statusMessage = "Saved. Original card was not modified."
             } catch (e: Exception) {
                 errorMessage = "Save failed: ${e.message}"
