@@ -11,6 +11,7 @@ import com.ps2mc.manager.data.McCardRepository
 import com.ps2mc.manager.mc.McCardImage
 import com.ps2mc.manager.mc.McCardWriter
 import com.ps2mc.manager.mc.McDirEntry
+import com.ps2mc.manager.mc.McPsu
 import kotlinx.coroutines.launch
 
 enum class Screen { HOME, CARD_BROWSER }
@@ -43,11 +44,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var clipboardEntry by mutableStateOf<McDirEntry?>(null)
         private set
 
+    var pendingPsuExportEntry by mutableStateOf<McDirEntry?>(null)
+        private set
+
     private var workingBytes: ByteArray? = null
     private var loadedCard: McCardImage? = null
     private var dirStack = mutableListOf<DirLevel>()
 
-    /** relCluster of the directory that is the CURRENT dir's own parent, or null if current dir is root. */
     private fun parentOfCurrentDir(): Int? =
         if (dirStack.size >= 2) dirStack[dirStack.size - 2].relCluster else null
 
@@ -160,6 +163,52 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 statusMessage = "Created \"$trimmed\""
             } catch (e: Exception) {
                 errorMessage = "Create folder failed: ${e.message}"
+            }
+            isLoading = false
+        }
+    }
+
+    /** Call right before launching the .psu export picker for a given folder entry. */
+    fun requestPsuExport(entry: McDirEntry) {
+        pendingPsuExportEntry = entry
+    }
+
+    /** Called with the chosen output Uri once the user picks a save location for the .psu. */
+    fun exportEntryAsPsu(uri: Uri) {
+        val entry = pendingPsuExportEntry
+        val image = loadedCard
+        if (entry == null || image == null) return
+        viewModelScope.launch {
+            isLoading = true
+            try {
+                val psuBytes = McPsu.build(image, entry)
+                app.contentResolver.openOutputStream(uri)?.use { it.write(psuBytes) }
+                statusMessage = "Exported \"${entry.name}.psu\""
+            } catch (e: Exception) {
+                errorMessage = "PSU export failed: ${e.message}"
+            }
+            pendingPsuExportEntry = null
+            isLoading = false
+        }
+    }
+
+    /** Called with a picked .psu file's Uri; imports it as a new folder in the current directory. */
+    fun importPsu(uri: Uri) {
+        val image = loadedCard
+        val bytes = workingBytes
+        if (image == null || bytes == null) return
+        viewModelScope.launch {
+            isLoading = true
+            try {
+                val psuBytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: throw Exception("Could not read the selected file.")
+                val psu = McPsu.parse(psuBytes)
+                val writer = McCardWriter.from(bytes, image)
+                writer.importPsuFolder(psu, dirStack.last().relCluster, parentOfCurrentDir())
+                applyWrittenBytes(writer.exportBytes())
+                statusMessage = "Imported \"${psu.name}\""
+            } catch (e: Exception) {
+                errorMessage = "PSU import failed: ${e.message}"
             }
             isLoading = false
         }
