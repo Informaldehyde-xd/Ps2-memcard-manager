@@ -12,8 +12,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Image
@@ -21,7 +24,6 @@ import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Save
-import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.ViewList
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -68,8 +70,10 @@ fun CardBrowserScreen(
     onBack: () -> Unit,
     onEntryTapped: (McDirEntry) -> Unit,
     onCopyEntry: (McDirEntry) -> Unit,
+    onExportPsu: (McDirEntry) -> Unit,
     onPasteHere: () -> Unit,
     onCreateFolder: (String) -> Unit,
+    onImportPsu: () -> Unit,
     onSaveAs: () -> Unit
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -132,6 +136,11 @@ fun CardBrowserScreen(
                         onClick = { menuOpen = false; onPasteHere() }
                     )
                     DropdownMenuItem(
+                        text = { Text("Import .psu…") },
+                        leadingIcon = { Icon(Icons.Filled.FileUpload, contentDescription = null) },
+                        onClick = { menuOpen = false; onImportPsu() }
+                    )
+                    DropdownMenuItem(
                         text = { Text("Save As…") },
                         leadingIcon = { Icon(Icons.Filled.Save, contentDescription = null) },
                         onClick = { menuOpen = false; onSaveAs() }
@@ -163,7 +172,12 @@ fun CardBrowserScreen(
                 modifier = Modifier.fillMaxSize()
             ) {
                 items(entries) { entry ->
-                    EntryGridCard(entry, onTap = { onEntryTapped(entry) }, onCopy = { onCopyEntry(entry) })
+                    EntryGridCard(
+                        entry,
+                        onTap = { onEntryTapped(entry) },
+                        onCopy = { onCopyEntry(entry) },
+                        onExportPsu = { onExportPsu(entry) }
+                    )
                 }
             }
             ViewMode.LIST -> LazyColumn(
@@ -172,7 +186,12 @@ fun CardBrowserScreen(
                 modifier = Modifier.fillMaxSize()
             ) {
                 items(entries) { entry ->
-                    EntryListRow(entry, onTap = { onEntryTapped(entry) }, onCopy = { onCopyEntry(entry) })
+                    EntryListRow(
+                        entry,
+                        onTap = { onEntryTapped(entry) },
+                        onCopy = { onCopyEntry(entry) },
+                        onExportPsu = { onExportPsu(entry) }
+                    )
                 }
             }
         }
@@ -214,7 +233,7 @@ private fun iconFor(entry: McDirEntry): Pair<ImageVector, androidx.compose.ui.gr
 }
 
 @Composable
-private fun EntryGridCard(entry: McDirEntry, onTap: () -> Unit, onCopy: () -> Unit) {
+private fun EntryGridCard(entry: McDirEntry, onTap: () -> Unit, onCopy: () -> Unit, onExportPsu: () -> Unit) {
     val (icon, tint) = iconFor(entry)
     Surface(
         shape = RoundedCornerShape(16.dp),
@@ -236,18 +255,22 @@ private fun EntryGridCard(entry: McDirEntry, onTap: () -> Unit, onCopy: () -> Un
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            IconButton(
-                onClick = onCopy,
-                modifier = Modifier.align(Alignment.TopEnd).size(28.dp)
-            ) {
-                Icon(Icons.Filled.ContentCopy, contentDescription = "Copy", tint = TextDim, modifier = Modifier.size(14.dp))
+            Row(modifier = Modifier.align(Alignment.TopEnd)) {
+                if (entry.isDirectory) {
+                    IconButton(onClick = onExportPsu, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Filled.FileDownload, contentDescription = "Export .psu", tint = TextDim, modifier = Modifier.size(14.dp))
+                    }
+                }
+                IconButton(onClick = onCopy, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Filled.ContentCopy, contentDescription = "Copy", tint = TextDim, modifier = Modifier.size(14.dp))
+                }
             }
         }
     }
 }
 
 @Composable
-private fun EntryListRow(entry: McDirEntry, onTap: () -> Unit, onCopy: () -> Unit) {
+private fun EntryListRow(entry: McDirEntry, onTap: () -> Unit, onCopy: () -> Unit, onExportPsu: () -> Unit) {
     val (icon, tint) = iconFor(entry)
     Surface(
         shape = RoundedCornerShape(12.dp),
@@ -273,6 +296,11 @@ private fun EntryListRow(entry: McDirEntry, onTap: () -> Unit, onCopy: () -> Uni
                 color = TextDim,
                 fontSize = 12.sp
             )
+            if (entry.isDirectory) {
+                IconButton(onClick = onExportPsu, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Filled.FileDownload, contentDescription = "Export .psu", tint = TextDim, modifier = Modifier.size(16.dp))
+                }
+            }
             IconButton(onClick = onCopy, modifier = Modifier.size(28.dp)) {
                 Icon(Icons.Filled.ContentCopy, contentDescription = "Copy", tint = TextDim, modifier = Modifier.size(16.dp))
             }
