@@ -8,9 +8,11 @@ import java.util.TimeZone
  * copy of the card's bytes — never mutates the original array/file. Call
  * [exportBytes] to get the finished image for saving to a NEW file.
  *
- * "." / ".." semantics and the root-directory special case are verified
- * directly against mymc's real, tested source (ps2mc.py create_dir_entry
- * and _check_dir), not guessed from spec prose alone.
+ * "." / ".." semantics verified against mymc's real source (create_dir_entry,
+ * _check_dir): for every directory except root, "." has length=0, cluster=
+ * parent's cluster, dirEntryIndex=slot index of this dir within the parent;
+ * ".." has length=0, cluster=0, dirEntryIndex=0. Root's own first entry is
+ * the one exception where length is the real child count.
  */
 class McCardWriter private constructor(
     private val data: ByteArray,
@@ -251,26 +253,12 @@ class McCardWriter private constructor(
         return newAbs to 0
     }
 
-    /** Global slot index (across the whole chain, matching how mymc's checker validates "." entries) of a slot. */
     private fun globalSlotIndex(parentStartRel: Int, slotClusterAbs: Int, slotIndexInCluster: Int): Int {
         val chain = getClusterChain(parentStartRel)
         val clusterPos = chain.indexOf(slotClusterAbs)
         return clusterPos * entriesPerDirCluster + slotIndexInCluster
     }
 
-    /**
-     * Creates a new, empty save/folder inside the directory at [parentStartRel].
-     * [parentOfParentStartRel] is parentStartRel's OWN parent (null if root) — needed
-     * to correctly update parentStartRel's recorded child count.
-     *
-     * Mode/field values verified directly against mymc's ps2mc.py create_dir_entry()
-     * and its filesystem checker (_check_dir):
-     *  - "." and ".." both use mode 0x8427 (DF_RWX|DF_0400|DF_DIR|DF_EXISTS).
-     *  - "." has length=0, cluster=parent's cluster, and dirEntryIndex = the real
-     *    slot index of this folder's own entry within the parent's listing — mymc's
-     *    checker explicitly validates (cluster, dirEntryIndex) == (parentCluster, slotIndex).
-     *  - ".." has length=0, cluster=0, dirEntryIndex=0 (genuinely unused).
-     */
     fun createFolder(parentStartRel: Int, parentOfParentStartRel: Int?, name: String): Int {
         val newRel = allocateChain(1)[0]
         val newAbs = newRel + superblock.allocOffset
@@ -288,33 +276,17 @@ class McCardWriter private constructor(
         return newRel
     }
 
-    /**
-     * Copies a single file's data + directory entry from [sourceImage] into [destParentStartRel].
-     * A zero-length file gets no allocated cluster and cluster=-1 (chain-end sentinel),
-     * matching mymc's create_dir_entry exactly.
-     */
-    fun copyFileEntry(
-        sourceImage: McCardImage,
-        sourceEntry: McDirEntry,
-        destParentStartRel: Int,
-        parentOfDestParentStartRel: Int?
-    ) {
-        val lengthBytes = sourceEntry.length
+    private fun writeFileWithData(destParentStartRel: Int, mode: Int, name: String, fileBytes: ByteArray) {
+        val lengthBytes = fileBytes.size
 
         if (lengthBytes == 0) {
             val (slotClusterAbs, slotIndex) = findOrCreateFreeDirSlot(destParentStartRel)
-            writeDirEntry(
-                slotClusterAbs, slotIndex,
-                RawDirEntry(sourceEntry.mode, 0, -1, 0, sourceEntry.name, System.currentTimeMillis())
-            )
-            syncDirEntryCount(destParentStartRel, parentOfDestParentStartRel)
+            writeDirEntry(slotClusterAbs, slotIndex, RawDirEntry(mode, 0, -1, 0, name, System.currentTimeMillis()))
             return
         }
 
         val clustersNeeded = (lengthBytes + clusterSize - 1) / clusterSize
         val newClusters = allocateChain(clustersNeeded)
-        val fileBytes = sourceImage.readFileData(sourceEntry.cluster, lengthBytes)
-
         var written = 0
         for (relCluster in newClusters) {
             val absCluster = relCluster + superblock.allocOffset
@@ -328,15 +300,23 @@ class McCardWriter private constructor(
         val (slotClusterAbs, slotIndex) = findOrCreateFreeDirSlot(destParentStartRel)
         writeDirEntry(
             slotClusterAbs, slotIndex,
-            RawDirEntry(sourceEntry.mode, lengthBytes, newClusters[0], 0, sourceEntry.name, System.currentTimeMillis())
+            RawDirEntry(mode, lengthBytes, newClusters[0], 0, name, System.currentTimeMillis())
         )
+    }
+
+    fun copyFileEntry(
+        sourceImage: McCardImage,
+        sourceEntry: McDirEntry,
+        destParentStartRel: Int,
+        parentOfDestParentStartRel: Int?
+    ) {
+        val fileBytes = if (sourceEntry.length > 0) {
+            sourceImage.readFileData(sourceEntry.cluster, sourceEntry.length)
+        } else ByteArray(0)
+        writeFileWithData(destParentStartRel, sourceEntry.mode, sourceEntry.name, fileBytes)
         syncDirEntryCount(destParentStartRel, parentOfDestParentStartRel)
     }
 
-    /**
-     * Copies an entire save folder (and its files, one level deep) from [sourceImage]
-     * into the directory at [destParentStartRel].
-     */
     fun copyFolderInto(
         sourceImage: McCardImage,
         sourceFolder: McDirEntry,
@@ -350,6 +330,14 @@ class McCardWriter private constructor(
         }
     }
 
-    /** Final image bytes, ready to be written to a new file. */
+    fun importPsuFolder(psu: PsuSave, destParentStartRel: Int, parentOfDestParentStartRel: Int?): Int {
+        val newFolderRel = createFolder(destParentStartRel, parentOfDestParentStartRel, psu.name)
+        for (f in psu.files) {
+            writeFileWithData(newFolderRel, f.mode, f.name, f.data)
+            syncDirEntryCount(newFolderRel, destParentStartRel)
+        }
+        return newFolderRel
+    }
+
     fun exportBytes(): ByteArray = data.copyOf()
 }
