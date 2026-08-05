@@ -71,17 +71,21 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
             onSettings = { Toast.makeText(context, "Settings — coming soon", Toast.LENGTH_SHORT).show() }
         )
         Screen.CARD_BROWSER -> CardBrowserScreen(
-            path = viewModel.currentPath,
-            entries = viewModel.currentEntries,
-            viewMode = viewModel.viewMode,
-            clipboardName = viewModel.clipboardEntry?.name,
-            onToggleViewMode = { viewModel.toggleViewMode() },
-            onBack = { viewModel.onBackPressed() },
-            onEntryTapped = { viewModel.onEntryTapped(it) },
-            onCopyEntry = { viewModel.copyEntry(it) },
-            onPasteHere = { viewModel.pasteHere() },
-            onCreateFolder = { viewModel.createFolder(it) },
-            onSaveAs = { saveAsLauncher.launch("${viewModel.cardFileName ?: "card"}_edited.ps2") }
-        )
+    path = viewModel.currentPath,
+    entries = viewModel.currentEntries,
+    viewMode = viewModel.viewMode,
+    clipboardName = viewModel.clipboardEntry?.name,
+    onToggleViewMode = { viewModel.toggleViewMode() },
+    onBack = { viewModel.onBackPressed() },
+    onEntryTapped = { viewModel.onEntryTapped(it) },
+    onCopyEntry = { viewModel.copyEntry(it) },
+    onPasteHere = { viewModel.pasteHere() },
+    onCreateFolder = { viewModel.createFolder(it) },
+    onSaveAs = { saveAsLauncher.launch("${viewModel.cardFileName ?: "card"}_edited.ps2") },
+    // --- ADD THESE TWO LINES BELOW ---
+    onExportPsu = { viewModel.exportPsu(it) },
+    onImportPsu = { openLauncher.launch(arrayOf("*/*")) }
+)
+        
     }
 }
