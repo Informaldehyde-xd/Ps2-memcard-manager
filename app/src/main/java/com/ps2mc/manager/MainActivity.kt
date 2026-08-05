@@ -62,7 +62,7 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
         }
     }
 
-    when (viewModel.screen) {
+        when (viewModel.screen) {
         Screen.HOME -> HomeScreen(
             isLoading = viewModel.isLoading,
             onOpenCard = { openLauncher.launch(arrayOf("*/*")) },
@@ -82,7 +82,7 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
             onPasteHere = { viewModel.pasteHere() },
             onCreateFolder = { viewModel.createFolder(it) },
             onSaveAs = { saveAsLauncher.launch("${viewModel.cardFileName ?: "card"}_edited.ps2") },
-            onExportPsu = { viewModel.exportPsu(it) },
+            onExportPsu = { entry -> Toast.makeText(context, "Export PSU: ${entry.name}", Toast.LENGTH_SHORT).show() },
             onImportPsu = { openLauncher.launch(arrayOf("*/*")) }
         )
     }
